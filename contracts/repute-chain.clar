@@ -209,3 +209,157 @@
     (ok new-reputation)
   )
 )
+
+(define-private (mint-reputation-nft (user principal) (reputation uint))
+  (let (
+    (nft-id (+ (var-get total-reputation-nfts) u1))
+  )
+    (try! (nft-mint? reputation-nft nft-id user))
+    (map-set reputation-nft-metadata nft-id {
+      owner: user,
+      reputation-score: reputation,
+      minted-at: stacks-block-height,
+      last-updated: stacks-block-height
+    })
+    (var-set total-reputation-nfts nft-id)
+    (ok nft-id)
+  )
+)
+
+(define-private (mint-membership-nft (user principal) (tier uint))
+  (let (
+    (nft-id (+ (var-get total-membership-nfts) u1))
+  )
+    (try! (nft-mint? membership-nft nft-id user))
+    (map-set membership-nft-metadata nft-id {
+      owner: user,
+      tier-level: tier,
+      granted-at: stacks-block-height,
+      expires-at: none
+    })
+    (var-set total-membership-nfts nft-id)
+    (ok nft-id)
+  )
+)
+
+(define-private (process-engagement-reward (creator principal) (amount uint))
+  (let (
+    (settings (unwrap! (map-get? creator-settings creator) ERR-NOT-FOUND))
+    (reward (get reward-per-engagement settings))
+  )
+    (if (and (get is-active settings) (> reward u0))
+      (begin
+        (try! (stx-transfer? reward (as-contract tx-sender) creator))
+        (map-set creator-settings creator
+          (merge settings {
+            total-distributed: (+ (get total-distributed settings) reward)
+          })
+        )
+        (ok reward)
+      )
+      (ok u0)
+    )
+  )
+)
+
+;; PUBLIC INTERFACE FUNCTIONS
+
+(define-public (initialize-user-profile)
+  (let (
+    (user tx-sender)
+  )
+    (asserts! (is-none (map-get? user-profiles user)) ERR-ALREADY-EXISTS)
+    (map-set user-profiles user {
+      reputation-score: u100,
+      last-activity-block: stacks-block-height,
+      total-earnings: u0,
+      engagement-count: u0,
+      reputation-nft-id: none,
+      membership-nft-id: none
+    })
+    (ok true)
+  )
+)
+
+(define-public (setup-creator-profile (threshold uint) (reward-per-engagement uint))
+  (let (
+    (creator tx-sender)
+  )
+    (asserts! (not (is-contract-paused)) ERR-UNAUTHORIZED)
+    (asserts! (> threshold u0) ERR-INVALID-THRESHOLD)
+    (asserts! (> reward-per-engagement u0) ERR-INVALID-AMOUNT)
+    
+    (map-set creator-settings creator {
+      earnings-threshold: threshold,
+      reward-per-engagement: reward-per-engagement,
+      is-active: true,
+      total-distributed: u0
+    })
+    (ok true)
+  )
+)
+
+(define-public (tip-creator (creator principal) (amount uint))
+  (let (
+    (tipper tx-sender)
+  )
+    (asserts! (not (is-contract-paused)) ERR-UNAUTHORIZED)
+    (asserts! (>= amount MIN-TIP-AMOUNT) ERR-INVALID-AMOUNT)
+    (asserts! (not (is-eq tipper creator)) ERR-UNAUTHORIZED)
+    
+    ;; Execute STX transfer to creator
+    (try! (stx-transfer? amount tipper creator))
+    
+    ;; Update reputation scores for both parties
+    (try! (update-reputation-score tipper u50))
+    (try! (update-reputation-score creator u100))
+    
+    ;; Record engagement in history
+    (map-set engagement-history 
+      {user: tipper, target: creator, stacks-block-height: stacks-block-height}
+      {
+        engagement-type: "tip",
+        amount: amount,
+        processed: true
+      }
+    )
+    
+    ;; Process engagement rewards
+    (try! (process-engagement-reward creator amount))
+    
+    (ok true)
+  )
+)
+
+(define-public (engage-with-creator (creator principal) (engagement-type (string-ascii 20)))
+  (let (
+    (user tx-sender)
+    (engagement-key {user: user, target: creator, stacks-block-height: stacks-block-height})
+    (valid-engagement (or (is-eq engagement-type "like") 
+                         (or (is-eq engagement-type "share") 
+                            (or (is-eq engagement-type "comment")
+                               (is-eq engagement-type "follow")))))
+  )
+    (asserts! (not (is-contract-paused)) ERR-UNAUTHORIZED)
+    (asserts! (not (is-eq user creator)) ERR-UNAUTHORIZED)
+    (asserts! valid-engagement ERR-INVALID-AMOUNT)
+    
+    ;; Enforce cooldown period to prevent spam
+    (asserts! (is-none (map-get? engagement-history 
+      {user: user, target: creator, stacks-block-height: (- stacks-block-height u1)})) 
+      ERR-COOLDOWN-ACTIVE)
+    
+    ;; Record engagement activity
+    (map-set engagement-history engagement-key {
+      engagement-type: engagement-type,
+      amount: u0,
+      processed: false
+    })
+    
+    ;; Update reputation for both parties
+    (try! (update-reputation-score user u25))
+    (try! (update-reputation-score creator u50))
+    
+    (ok true)
+  )
+)
