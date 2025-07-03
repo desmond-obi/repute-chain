@@ -101,3 +101,111 @@
     last-updated: uint
   }
 )
+
+(define-map membership-nft-metadata
+  uint
+  {
+    owner: principal,
+    tier-level: uint,
+    granted-at: uint,
+    expires-at: (optional uint)
+  }
+)
+
+;; UTILITY FUNCTIONS
+
+(define-private (min-uint (a uint) (b uint))
+  (if (< a b) a b)
+)
+
+(define-private (max-uint (a uint) (b uint))
+  (if (> a b) a b)
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-user-profile (user principal))
+  (map-get? user-profiles user)
+)
+
+(define-read-only (get-creator-settings (creator principal))
+  (map-get? creator-settings creator)
+)
+
+(define-read-only (get-current-reputation (user principal))
+  (let (
+    (profile (unwrap! (map-get? user-profiles user) (err u0)))
+    (last-activity (get last-activity-block profile))
+    (current-block stacks-block-height)
+    (blocks-since-activity (- current-block last-activity))
+    (base-reputation (get reputation-score profile))
+  )
+    (if (> blocks-since-activity REPUTATION-DECAY-PERIOD)
+      (let ((decay-factor (/ blocks-since-activity REPUTATION-DECAY-PERIOD)))
+        (if (>= decay-factor base-reputation)
+          (ok u0)
+          (ok (- base-reputation (min-uint decay-factor base-reputation)))
+        )
+      )
+      (ok base-reputation)
+    )
+  )
+)
+
+(define-read-only (get-membership-tier (tier-id uint))
+  (map-get? membership-tiers tier-id)
+)
+
+(define-read-only (get-reputation-nft-info (nft-id uint))
+  (map-get? reputation-nft-metadata nft-id)
+)
+
+(define-read-only (get-membership-nft-info (nft-id uint))
+  (map-get? membership-nft-metadata nft-id)
+)
+
+(define-read-only (calculate-tier-for-reputation (reputation uint))
+  (if (>= reputation u8000)
+    u4 ;; Platinum Tier
+    (if (>= reputation u5000)
+      u3 ;; Gold Tier
+      (if (>= reputation u2000)
+        u2 ;; Silver Tier
+        u1 ;; Bronze Tier
+      )
+    )
+  )
+)
+
+(define-read-only (is-contract-paused)
+  (var-get contract-paused)
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+(define-private (update-reputation-score (user principal) (points uint))
+  (let (
+    (current-profile (default-to 
+      {
+        reputation-score: u0,
+        last-activity-block: stacks-block-height,
+        total-earnings: u0,
+        engagement-count: u0,
+        reputation-nft-id: none,
+        membership-nft-id: none
+      }
+      (map-get? user-profiles user)
+    ))
+    (current-reputation (unwrap! (get-current-reputation user) ERR-NOT-FOUND))
+    (new-reputation (min-uint (+ current-reputation points) MAX-REPUTATION-SCORE))
+  )
+    (map-set user-profiles user
+      (merge current-profile {
+        reputation-score: new-reputation,
+        last-activity-block: stacks-block-height,
+        engagement-count: (+ (get engagement-count current-profile) u1)
+      })
+    )
+    (ok new-reputation)
+  )
+)
